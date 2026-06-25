@@ -11,7 +11,6 @@ st.set_page_config(
 )
 
 # --- KHÓA BẢO MẬT TRUY CẬP (XÁC THỰC) ---
-# Bạn có thể đổi mật khẩu này trực tiếp hoặc cấu hình trong Streamlit Secrets
 ACCESS_PASSWORD = st.secrets.get("ACCESS_PASSWORD", "MinhLoc@2026_SPX")
 
 
@@ -44,8 +43,7 @@ if not check_password():
     st.stop()
 
 
-# --- KẾT NỐI DATABASE SUPABASE ---
-# Các biến URL và KEY này sẽ được cấu hình an toàn trong mục Secrets của Streamlit Cloud
+# --- KẾT NỐI DATABASE SUPABASE (ĐÃ SỬA LỖI ĐƯỜNG DẪN PGRST125) ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY")
 
@@ -55,7 +53,12 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     )
     st.stop()
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Xử lý làm sạch URL: Loại bỏ khoảng trắng và dấu gạch chéo '/' dư thừa ở cuối chuỗi
+CLEAN_URL = SUPABASE_URL.strip().rstrip("/")
+
+# Khởi tạo Supabase Client bằng URL đã được chuẩn hóa an toàn
+supabase: Client = create_client(CLEAN_URL, SUPABASE_KEY)
+
 
 # --- CẤU HÌNH DISCORD WEBHOOK ---
 ENABLE_DISCORD = st.secrets.get("ENABLE_DISCORD", False)
@@ -95,7 +98,6 @@ def db_load_tracking_list():
     """Lấy toàn bộ danh sách đơn hàng từ bảng 'orders' của Supabase"""
     try:
         response = supabase.table("orders").select("*").execute()
-        # Chuyển đổi định dạng danh sách sang dict giống cấu hình cũ để giữ nguyên logic xử lý UI
         watchlist = {}
         for row in response.data:
             watchlist[row["tracking_id"]] = {
@@ -111,7 +113,7 @@ def db_load_tracking_list():
 
 
 def db_save_or_update_order(tracking_id, name, latest_status, group):
-    """Lưu mới hoặc cập nhật một đơn hàng (UPSERT) vào Database"""
+    """Lưu mới hoặc cập nhật trạng thái đơn hàng (UPSERT) vào Database"""
     data = {
         "tracking_id": tracking_id,
         "name": name,
@@ -122,7 +124,7 @@ def db_save_or_update_order(tracking_id, name, latest_status, group):
     try:
         supabase.table("orders").upsert(data).execute()
     except Exception as e:
-        print(f"Lỗi ghi Database: {e}")
+        print(f"Lỗi ghi dữ liệu vào Database: {e}")
 
 
 def db_delete_order(tracking_id):
@@ -135,7 +137,7 @@ def db_delete_order(tracking_id):
 
 # --- CÁC HÀM GỌI API SPX CORE ---
 def fetch_spx_status(tracking_id):
-    """Gọi API từ file README của bạn"""
+    """Gọi API hệ thống dựa theo cấu hình headers của file README"""
     url = f"https://spx.vn/shipment/order/open/order/get_order_info?spx_tn={tracking_id}&language_code=vi"  #
     headers = {
         "accept": "application/json, text/plain, */*",  #
@@ -165,7 +167,7 @@ def fetch_spx_status(tracking_id):
 
 
 def parse_latest_status(order_data):
-    """Phân tích dữ liệu mốc thời gian và phân nhóm trạng thái"""
+    """Phân tích dữ liệu lịch sử vận đơn và phân chia nhóm trạng thái chuẩn xác"""
     records = (
         order_data.get("sls_tracking_info", {}).get("records", [])  #
         if order_data
@@ -190,6 +192,7 @@ def parse_latest_status(order_data):
     if loc:
         status_str += f" ({loc})"
 
+    # Thuật toán phân loại nhóm trạng thái dựa trên từ khóa tiếng Việt thực tế
     status_lower = desc.lower()
     if "hủy" in status_lower:
         group = "CANCELLED"
@@ -208,13 +211,13 @@ def parse_latest_status(order_data):
     return status_str, time_str, group
 
 
-# --- TIẾN TRÌNH CHẠY NGẦM GIÁM SÁT TỰ ĐỘNG ---
+# --- TIẾN TRÌNH CHẠY NGẦM GIÁM SÁT TỰ ĐỘNG (BACKGROUND THREAD) ---
 def background_monitor(interval_seconds=1800):
-    """Hàm chạy ngầm liên tục độc lập quét và đẩy thông báo đổi trạng thái đơn hàng"""
-    print("🚀 Background Monitor với Supabase đã bắt đầu chạy...")
+    """Vòng lặp chạy ngầm liên tục quét API định kỳ để phát hiện và báo trạng thái mới về Discord"""
+    print("🚀 Tiến trình giám sát chạy ngầm (Background Monitor) đã kích hoạt...")
     while True:
         try:
-            # Load danh sách trực tiếp từ DB
+            # Truy vấn danh sách trực tiếp từ Database online
             response = supabase.table("orders").select("*").execute()
             for row in response.data:
                 tid = row["tracking_id"]
@@ -222,7 +225,7 @@ def background_monitor(interval_seconds=1800):
                 current_status = row["latest_status"]
                 name = row["name"]
 
-                # Đơn đã giao xong hoặc hủy thì bỏ qua không quét API tránh quá tải
+                # Nếu đơn hàng đã giao xong hoặc đã hủy thì bỏ qua không quét lại nữa
                 if current_group in ["DELIVERED", "CANCELLED"]:
                     continue
 
@@ -230,13 +233,12 @@ def background_monitor(interval_seconds=1800):
                 if data:
                     new_status, _, new_group = parse_latest_status(data)
 
-                    # Phát hiện trạng thái thay đổi
+                    # Phát hiện trạng thái thay đổi so với bản ghi cũ trong Database
                     if current_status != new_status:
-                        # Cập nhật vào DB
                         db_save_or_update_order(tid, name, new_status, new_group)
 
-                        # Bắn thông báo qua Discord Webhook
-                        title = f"📦 ĐƠN HÀNG THAY ĐỔI: {name}"
+                        # Phát thông báo khẩn về kênh Discord qua Webhook
+                        title = f"📦 ĐƠN HÀNG THAY ĐỔI TRẠNG THÁI: {name}"
                         body = (
                             f"**Mã vận đơn:** `{tid}`\n"
                             f"❌ **Trạng thái cũ:** {current_status}\n"
@@ -244,28 +246,28 @@ def background_monitor(interval_seconds=1800):
                         )
                         send_discord_alert(title, body, new_group)
 
-                time.sleep(1.0)  # Sleep giãn cách nhẹ giữa các đơn tránh bị block IP
+                time.sleep(1.2)  # Giãn cách 1.2s mỗi đơn hàng để tránh bị chặn IP (Anti-Spam)
 
         except Exception as e:
-            print(f"Lỗi tiến trình chạy ngầm: {e}")
+            print(f"Lỗi trong luồng kiểm tra ngầm: {e}")
 
-        time.sleep(interval_seconds)
+        time.sleep(interval_seconds)  # Chờ hết chu kỳ (ví dụ: 30 phút) trước khi quét lượt kế tiếp
 
 
-# Khởi chạy Thread ngầm đồng bộ
+# Khởi động luồng chạy ngầm duy nhất một lần khi máy chủ Streamlit bật ứng dụng
 if "bg_thread_started" not in st.session_state:
     st.session_state.bg_thread_started = True
-    t = Thread(target=background_monitor, args=(1800,), daemon=True)  # Mỗi 30 phút
+    t = Thread(target=background_monitor, args=(1800,), daemon=True)
     t.start()
 
 
-# --- GIAO DIỆN ĐỒNG BỘ STREAMLIT UI ---
+# --- GIAO DIỆN CHÍNH TRÊN TRÌNH DUYỆT (STREAMLIT UI) ---
 st.title("🚚 Hệ Thống Theo Dõi Đơn Hàng SPX Express")
 
-# Tải dữ liệu hiển thị tức thời từ Database Supabase về bộ nhớ đệm UI
+# Tải danh sách đơn hàng real-time từ Database Supabase về hiển thị lên UI
 watchlist = db_load_tracking_list()
 
-# Tính toán số lượng cho Metric cards từ DB
+# Đếm tổng hợp dữ liệu theo từng nhóm để hiển thị 4 ô trạng thái trên cùng
 count_pending = sum(1 for info in watchlist.values() if info.get("group") == "PENDING")
 count_shipping = sum(1 for info in watchlist.values() if info.get("group") == "SHIPPING")
 count_delivered = sum(
@@ -275,7 +277,7 @@ count_cancelled = sum(
     1 for info in watchlist.values() if info.get("group") == "CANCELLED"
 )
 
-# Hiển thị 4 ô trạng thái hàng đầu
+# Hiển thị 4 Khối thống kê (Metric Cards)
 m1, m2, m3, m4 = st.columns(4)
 with m1:
     st.metric(label="📦 Chờ lấy hàng", value=count_pending)
@@ -301,7 +303,7 @@ with col_input:
         submit_btn = st.form_submit_button("Tra cứu & Thêm vào danh sách")
 
         if submit_btn and tracking_id:
-            with st.spinner("Đang kết nối API hệ thống..."):
+            with st.spinner("Đang kết nối API hệ thống SPX..."):
                 data = fetch_spx_status(tracking_id)
                 latest_status, _, group = parse_latest_status(data)
                 if not data:
@@ -311,16 +313,15 @@ with col_input:
                     )
 
                 final_name = order_name if order_name else "Đơn hàng không tên"
-                # Lưu thẳng đơn hàng vào Database online
                 db_save_or_update_order(tracking_id, final_name, latest_status, group)
-                st.success(f"🎉 Đã lưu đơn hàng vào Database thành công!")
+                st.success(f"🎉 Đã đồng bộ đơn hàng vào Database online!")
                 st.rerun()
 
 with col_actions:
     st.subheader("⚡ Thao Tác Toàn Danh Sách")
     if st.button("🔄 Cập nhật thủ công ngay lập tức", use_container_width=True):
         if watchlist:
-            with st.spinner("Đang đồng bộ tất cả đơn hàng từ API..."):
+            with st.spinner("Đang thực hiện quét đồng bộ lại toàn bộ danh mục..."):
                 for tid, info in watchlist.items():
                     data = fetch_spx_status(tid)
                     if data:
@@ -328,8 +329,8 @@ with col_actions:
                         db_save_or_update_order(
                             tid, info["name"], latest_status, group
                         )
-                    time.sleep(0.5)
-            st.success("Đã làm mới xong tất cả đơn hàng!")
+                    time.sleep(0.6)
+            st.success("Đã đồng bộ xong trạng thái mới nhất!")
             st.rerun()
 
     if watchlist:
@@ -346,7 +347,7 @@ with col_actions:
             st.warning(f"Đã xóa mã đơn {del_tid} khỏi hệ thống.")
             st.rerun()
 
-# --- DANH SÁCH HIỂN THỊ CHI TIẾT ---
+# --- HIỂN THỊ DANH SÁCH CHI TIẾT ---
 st.write("---")
 st.subheader("📊 Danh Sách Đơn Hàng Đang Theo Dõi")
 
