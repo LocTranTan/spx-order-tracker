@@ -4,7 +4,10 @@ from threading import Thread
 import requests
 import streamlit as st
 from supabase import create_client, Client
+from datetime import datetime, timedelta, timezone
 
+# Tạo múi giờ UTC+7
+tz_vn = timezone(timedelta(hours=7))
 # --- CẤU HÌNH TRANG WEB ---
 st.set_page_config(
     page_title="SPX Order Tracker Dashboard", page_icon="🚚", layout="wide"
@@ -114,12 +117,17 @@ def db_load_tracking_list():
 
 def db_save_or_update_order(tracking_id, name, latest_status, group):
     """Lưu mới hoặc cập nhật trạng thái đơn hàng (UPSERT) vào Database"""
+    # Tạo múi giờ UTC+7
+    tz_vn = timezone(timedelta(hours=7))
+    # Lấy giờ hiện tại theo múi giờ vừa tạo
+    current_time_vn = datetime.now(tz_vn).strftime("%Y-%m-%d %H:%M:%S")
+    
     data = {
         "tracking_id": tracking_id,
         "name": name,
         "latest_status": latest_status,
         "group": group,
-        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_updated": current_time_vn.strftime("%Y-%m-%d %H:%M:%S"),
     }
     try:
         supabase.table("orders").upsert(data).execute()
