@@ -385,3 +385,43 @@ else:
             with c_time:
                 st.caption(f"Cập nhật: {info['last_updated']}")
             st.write("")
+
+# --- TRA CỨU LỊCH SỬ CHI TIẾT 1 ĐƠN HÀNG ---
+st.write("---")
+st.subheader("🔍 Tra Cứu Lịch Sử Chi Tiết")
+with st.form("search_history_form"):
+    search_tid = st.text_input(
+        "Nhập mã vận đơn để xem toàn bộ lịch sử (Ví dụ: SPXVN...):"
+    ).strip()
+    search_btn = st.form_submit_button("Tra cứu lịch sử hành trình")
+
+    if search_btn:
+        if search_tid:
+            with st.spinner(f"Đang tải dữ liệu từ SPX cho mã {search_tid}..."):
+                # Gọi API để lấy toàn bộ dữ liệu
+                data = fetch_spx_status(search_tid)
+                
+                if data:
+                    # Lấy danh sách toàn bộ các mốc thời gian
+                    records = data.get("sls_tracking_info", {}).get("records", [])
+                    if records:
+                        st.success(f"Lịch sử hành trình cho mã: **{search_tid}**")
+                        
+                        # In ra từng dòng trạng thái theo thứ tự thời gian
+                        for rec in records:
+                            timestamp = rec.get("actual_time", 0)
+                            time_str = (
+                                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+                                if timestamp
+                                else "N/A"
+                            )
+                            desc = rec.get("buyer_description") or rec.get("description") or ""
+                            loc = rec.get("current_location", {}).get("location_name") or ""
+                            
+                            st.markdown(f"- 🕒 **{time_str}** | {desc} {f'*(Tại: {loc})*' if loc else ''}")
+                    else:
+                        st.warning("Đơn hàng này chưa có dữ liệu lịch sử hành trình.")
+                else:
+                    st.error("Không thể lấy dữ liệu. Vui lòng kiểm tra lại mã vận đơn hoặc hệ thống SPX đang bận.")
+        else:
+            st.warning("Vui lòng nhập mã vận đơn trước khi tra cứu!")
