@@ -178,42 +178,49 @@ def fetch_spx_status(tracking_id):
     return None
 
 
-def parse_latest_status(data):
-    if not data:
-        return "N/A", "N/A", "Không có dữ liệu"
-        
-    records = data.get("sls_tracking_info", {}).get("records", [])
+def parse_latest_status(order_data):
+    """Phân tích dữ liệu lịch sử vận đơn và phân chia nhóm trạng thái chuẩn xác"""
+    records = (
+        order_data.get("sls_tracking_info", {}).get("records", [])  #
+        if order_data
+        else []
+    )
     if not records:
-        return "N/A", "N/A", "Chưa có hành trình"
+        return "Chưa có thông tin", "N/A", "UNKNOWN"
 
-    # --- BƯỚC 1: QUÉT TÌM TRẠNG THÁI HUỶ HOẶC HOÀN TRẢ TRONG TOÀN BỘ LỊCH SỬ ---
-    is_cancelled = False
-    cancel_time_str = ""
-    for rec in records:
-        desc = (rec.get("buyer_description") or rec.get("description") or "").lower()
-        # Bắt cả 2 kiểu gõ dấu: "Huỷ" và "Hủy"
-        if "huỷ" in desc or "hủy" in desc or "trả hàng" in desc:
-            is_cancelled = True
-            timestamp = rec.get("actual_time", 0)
-            cancel_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else "N/A"
-            break # Tìm thấy trạng thái huỷ thì dừng vòng lặp
+    latest = records[0]  #
+    timestamp = latest.get("actual_time", 0)  #
+    time_str = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        if timestamp
+        else "N/A"
+    )
 
-    # --- BƯỚC 2: LẤY TRẠNG THÁI MỚI NHẤT NHƯ BÌNH THƯỜNG ---
-    latest_rec = records[0]
-    timestamp = latest_rec.get("actual_time", 0)
-    latest_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else "N/A"
-    
-    desc = latest_rec.get("buyer_description") or latest_rec.get("description") or "N/A"
-    loc = latest_rec.get("current_location", {}).get("location_name") or ""
-    
+    desc = latest.get("buyer_description") or latest.get("description") or ""  #
+    loc = latest.get("current_location", {}).get("location_name") or ""  #
+    code = latest.get("tracking_code", "")  #
+
+    status_str = f"[{time_str}] {desc}"
     if loc:
-        desc = f"{desc} (Tại: {loc})"
+        status_str += f" ({loc})"
 
-    # --- BƯỚC 3: GHI ĐÈ TRẠNG THÁI NẾU ĐƠN ĐÃ BỊ HUỶ ---
-    if is_cancelled:
-        desc = f"❌ ĐÃ HUỶ (Ghi nhận lúc: {cancel_time_str}) - Trạng thái máy quét cuối: {desc}"
+    # Thuật toán phân loại nhóm trạng thái dựa trên từ khóa tiếng Việt thực tế
+    status_lower = desc.lower()
+    if "hủy" in status_lower:
+        group = "CANCELLED"
+    elif code == "F980" or "giao thành công" in status_lower:
+        group = "DELIVERED"
+    elif (
+        code == "A000"  #
+        or "đã được tạo" in status_lower
+        or "lấy hàng" in status_lower
+        or "chờ lấy" in status_lower
+    ):
+        group = "PENDING"
+    else:
+        group = "SHIPPING"
 
-    return latest_time_str, loc, desc
+    return status_str, time_str, group
 
 
 # --- TIẾN TRÌNH CHẠY NGẦM GIÁM SÁT TỰ ĐỘNG (BACKGROUND THREAD) ---
